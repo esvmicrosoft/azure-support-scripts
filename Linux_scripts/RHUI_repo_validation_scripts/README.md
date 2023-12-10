@@ -1,16 +1,52 @@
-# Overview
-This script validates the repo servers connectivity and provides recommendation for the fix based on the error message.
+# RHUI Test script.
 
-1. Executes yum clean all and yum check-update commands.
-2. Captures the output and error from yum check-update.
-3. If no errors observed, then prints that repo connectivity is successful.
-4. If any errors are observed validates the error with the defined conditions and provides recommendation for the fix.
+## Goal
 
-# Supported OS Images
+Develop a script to test proper configruation and connectivity to the RHUI repositories in Azure while avoiding inducing failures caused by additional repositories in the server.
 
-This version of the script currently supports only Redhat VMs for now(rhe6, rhel7 and 8 non-byos VMs which are deployed from Azure market place image).
-## Usage
-Execute the below commands on Redhat VM for script execution.<br>
-<pre><code class="lang-azurecli" data-interactive="azurecli">mkdir /tmp/rhui && cd /tmp/rhui </code></pre>
-<pre><code class="lang-azurecli" data-interactive="azurecli">wget https://github.com/Azure/azure-support-scripts/archive/refs/heads/master.zip && unzip master.zip 'azure-support-scripts-master/Linux_scripts/RHUI_repo_validation_scripts/*' && rm -f master.zip && cd azure-support-scripts-master/Linux_scripts/RHUI_repo_validation_scripts </code></pre> 
-<pre><code class="lang-azurecli" data-interactive="azurecli">python repo_check.py or python3 repo_check.py </code></pre>
+
+Required characteristics:
+
+* It must run on RHEL7, 8 and 9.
+* It must support EUS, E4S and non-EUS repositories.
+* It must not require additional packages other than found in the plain vanilla installations from Marketplace.
+**The python OpenSSL module does not come pre-installed by default**
+
+
+So far this is the list of completed tests:
+
+- RHUI Package installed
+- RHUI repo config file must exist.
+- Client certificate and key must exist.
+- Client certificate expiration time.
+- Microsoft Repository (where the rhui package is installed) must be enabled.
+- At least one RHUI repository enabled. (where the software is installed)
+- The server must be able to download the repomd.xml file from the Microsoft repository and the RHUI ones.
+
+Tests not yet implemented or need additional work:
+
+Proper DNS resoultuion of the RHUI servers.
+Test for 404 conditions.
+Valid values for /etc/yum/vars/releasever. (or /etc/dnf/vars....)
+Daily cron job file available.
+Anacron daemon enabled.
+
+## Usage:
+
+Since RHEL7 does not come with python3 pre-installed, at this time it is required to select the python interpreter manually and the script **must** be executed 
+with root privileges.
+
+- RHEL7.x
+
+```
+sudo python ./rhui_test.py
+```
+
+- RHEL8.x and above
+
+```
+sudo python3 ./rhui_test.py
+```
+
+
+

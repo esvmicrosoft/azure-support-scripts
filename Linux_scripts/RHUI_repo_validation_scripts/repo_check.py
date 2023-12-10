@@ -1,203 +1,336 @@
-import os
-import sys
+#!/bin/env bash
+
+import argparse
 import logging
-from logging.handlers import RotatingFileHandler
-from logging import handlers
+import os
+import re
 import subprocess
-import platform
-from threading import Timer
-import socket
 import time
-from scenarios import *
+import sys
 
-VERSION = "1.0.0"
-SCRIPT_NAME = "repo_check.py"
-
-
-########### Function for RHEL VMs ##############
-def redhat():
-      ##### checking connectivity of RHEL Repo server IPs #####
-
-   def ip_tables_check():
-      reject_rule = subprocess.Popen("iptables -L OUTPUT -v -n | egrep -i 'reject|drop'", stdout=subprocess.PIPE, shell=True)
-      rej_rule = str(reject_rule.communicate()[0])
-      error_list = ["tcp dpt:443 reject-with icmp-port-unreachable", "tcp dpt:https reject-with icmp-port-unreachable", "   reject-with icmp-port-unreachable", "tcp dpt:443"]
-      for error in error_list:
-         if error in rej_rule:
-            logging.info(rej_rule)
-            msg_ip_tables_check()
-
-   def isOpen(servers,port):
-      s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-      try:
-         s.settimeout(2)
-         s.connect((servers, int(port)))
-         s.shutdown(2)
-      except:
-         msg_rhui_ip_connectivity_error(servers)
-         ip_tables_check()
-         msg_virtual_appliance()
- 
-   def isresolving(servers):
-      resolution_check = subprocess.Popen("dig servers", stdout=subprocess.PIPE, shell=True)
-      reslov_check = str(resolution_check.communicate()[0])
-      if "connection timed out; no servers could be reached" in reslov_check:
-         msg_dns_resolution_error()
-           
-
-   ##### rhui connectivity check ########
-
-   def rhui_ip_conn_check():
-      logging.info("checking connectivity of RHUI repo server IPs \n")
-      servers = ["rhui-1.microsoft.com", "rhui-2.microsoft.com", "rhui-3.microsoft.com"]
-      port = "443"
-      for server in servers:
-         isresolving(server)
-         isOpen(server,port)
-      msg_rhui_ip_connectivity_success()
-   rhui_ip_conn_check()
-
-   ##### rhui-package validation check ########
-
-   def rhui_package_check():
-      rpm_check = subprocess.Popen("rpm -qa | grep -w rhui-azure", stdout=subprocess.PIPE, shell=True)
-      rhui_check = str(rpm_check.communicate()[0])
-      if "rhui-azure" in rhui_check:
-         if "eus" in rhui_check:
-             repo_type = "eus"
-             return(repo_type)
-         else:
-             repo_type = "non-eus"
-             return(repo_type)
-      else:
-         msg_rhui_package_check_error()
-   rhui_package_check()
-
-   ##### executes "yum cleanall" and also checks whether any other app is holding yum lock########
-
-   def yum_clean_up():
-     cmd = ['yum', 'clean', 'all']
-     yum_clean = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-     kill = lambda process: process.kill()
-     my_timer = Timer(1, kill, [yum_clean])
-     try:
-        my_timer.start()
-        stdout, stderr = yum_clean.communicate()
-        if "Another app is currently holding the yum lock" in stderr.decode() or "Waiting for process with" in stderr.decode():
-           msg_multiple_yum_process()
-     except:
-         logging.error("Issue happened while executing yum clean all command or while gathering yum processes list. Fix the issue and rerun the script")
-     finally:
-        my_timer.cancel()
+###########################################################################################
+# 
+#   Handling whether the RPM exists or not.
+#
+###########################################################################################
 
 
-   ##### executes "yum check-update" command and gathers the ouput and error ########
-  
+def rpm_name():
+    logging.debug("Entering repo_name()")
+    result = subprocess.Popen('rpm -qa | grep rhui', shell=True, stdout=subprocess.PIPE)
+    rpm_name = result.stdout.read().decode('utf-8').strip()
+    if rpm_name:
+        return(rpm_name)
+    else:
+        logging.critical("could not find a specific RHUI package installed, please refer to the documentation and install the apropriate one")
+        logging.critical("Consider using the following document to install RHUI support https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-linux-rhui-certificate-issues#cause-3-rhui-package-is-missing")
+        exit(1)
 
-   def yum_repo_check():
-      logging.info("Cleaning up yum")
-      yum_clean_up()
-      time.sleep(5)
-      logging.info("yum check-update is being executed at the backend. This might take around 30 - 180 seconds to complete. Please wait .......")
-      cmd = ['yum', 'check-update']
-      yum = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-      kill = lambda process: process.kill()
-      my_timer = Timer(125, kill, [yum])
-      try:
-         my_timer.start()
-         stdout, stderr = yum.communicate()
-         return stderr
-      except:
-         logging.error("There seems to be some issue while processing yum check-update command output, Manually execute yum check-update command to check the error, if yum check-update command completes, then rerun this script for identifying RHUI issue.")
-      finally:
-         my_timer.cancel()
+def get_pkg_info(package_name):
+    logging.debug("Entering get_pkg_info()")
+    pattern = {}
+    pattern['clientcert'] = r'^/[/a-zA-Z0-9_\-]+\.(crt)$'
+    pattern['clientkey']  = r'^/[/a-zA-Z0-9_\-]+\.(pem)$'
+    pattern['repofile']    = r'^/[/a-zA-Z0-9_\-\.]+\.(repo)$'
 
-
-   ###### Provides recommendation for the fix after validating the errors. #######
-   
-   def error_check():
-      status = str(yum_repo_check())
-
-      if "".__eq__(status) or "b''" in status:
-         msg_yum_repolist_success()
-
-      elif "HTTPS Error 404" in status and rhui_package_check() is not "eus":
-         msg_https_404_error_non_eus()
-      
-      elif "HTTPS Error 404" in status and rhui_package_check() is "eus":
-         msg_https_404_error_eus()
-
-      elif "Connection timed out after 30001 milliseconds" in status or "Connection timed out after 30000 milliseconds" in status:
-         msg_virtual_appliance()
-
-      elif "HTTPS Error 403 - Forbidden" in status:
-         msg_https_403_error()
-
-      elif "SSL peer rejected your certificate as expired" in status or "Certificate has expired" in status:
-         msg_cert_expiry_error()
-
-      elif "Error: Failed to synchronize cache for repo" in status:  
-         msg_rhel8_possible_causes()
-
-      elif "Failed to download metadata for repo" in status: 
-         msg_rhel8_possible_causes()
-   
-      elif "except KeyboardInterrupt" in status:
-         msg_python_config_issue()
+    logging.debug("Entering pkg_info function")
+    try:
+        result = subprocess.Popen(['rpm', '-q', '--list', package_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        info = result.stdout.read().decode('utf-8').strip().split('\n')
         
-     
-      else:
-         msg_new_scenario()
-   error_check() 
+        hash_info = {}
+        for key in pattern.keys():
+            logging.debug("checking key {}".format(key))
+            for data in info:
+                logging.debug("checking key {} and data {}".format(key, data))
+                if re.match(pattern[key], data):
+                    hash_info[key] = data
+                    break
+    except:
+        logging.critical("Failed to grab RHUI RPM details, rebuild RPM database")
+        exit(1)
+
+    errors = 0
+    for keyname in pattern.keys():
+        if keyname not in hash_info.keys():
+            logging.critical("{} file definition not found in RPM metadata, {} rpm needs to be reinstalled".format(keyname, package_name))
+            errors += 1
+        else: 
+            if not os.path.exists(hash_info[keyname]):
+                logging.critical("{} file not found in server, {} rpm needs to be reinstalled".format(keyname, package_name))
+                errors += 1
+
+    if errors:
+        logging.critical("follow {} for information to install the RHUI package".format("https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-linux-rhui-certificate-issues#cause-2-rhui-certificate-is-missing"))
+        exit(1)
+    else:
+        return(hash_info)
+
+def expiration_time(path):
+###########################################################################################
+# 
+# Checks whether client certificate has expired yet or not.
+#
+###########################################################################################
+
+    logging.debug("Entering expiration_time()")
+    logging.debug('Checking certificate expiration time')
+    try:
+        result = subprocess.check_call('openssl x509 -in {} -checkend 0 > /dev/null 2>&1 '.format(path),shell=True)
+    except subprocess.CalledProcessError:
+        logging.critical("Client RHUI Certificate has expired, please update the rhui RPM")
+        logging.critical("Refer to: https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/troubleshoot-linux-rhui-certificate-issues#cause-1-rhui-client-certificate-is-expired")
+        exit(1)
+    
+
+def check_rhui_repo_file(path):
+    logging.debug("Entering check_rhui_repo_file()")
+###########################################################################################
+# 
+# Handling the consistency of the Red Hat repositories
+# path: Indicates where the rhui repo is stored.
+#
+###########################################################################################
+    try:
+        import ConfigParser as configparser
+    except ImportError:
+        import configparser
+
+    class localParser(configparser.ConfigParser):
+
+        def as_dict(self):
+            d = dict(self.sections)
+            for k in d:
+                d[k] = dict(self._defaults, **d[k])
+                d[k].pop('__name__', None)
+            return d
+
+#################################################
+# 
+#  fixme()
+# 
+#################################################
+    logging.debug("RHUI repo file is {}".format(path))
+    try:
+        reposconfig = localParser()
+        try:
+            with open(path) as stream:
+                reposconfig.read_string('[default]\n' + stream.read())
+        except AttributeError:
+            reposconfig.add_section('[default]')
+            reposconfig.read(path)
+
+        logging.debug(reposconfig.sections())
+        return reposconfig
+
+    except configparser.ParsingError:
+        logging.critical("{} does not follow standard REPO config format, reconsider reinstall RHUI rpm and try again".format(path))
+        exit(1)
+
+#################################################
+# 
+#################################################
+
+def check_microsoft_repo(reposconfig):
+    logging.debug("Entering microsoft_repo()")
+# Checks whether the rhui-microsoft-azure-* repository exists and tests connectivity to it
+    rhuirepo = '^(rhui-)?microsoft.*'
+
+    myreponame = ""
+    for repo_name in reposconfig.sections():
+        if re.match(rhuirepo, repo_name):
+           logging.info("Using Microsoft RHUI repository {}".format(repo_name))
+           myreponame = repo_name
+
+    if myreponame:
+       try:
+           enabled =  int(reposconfig.get(myreponame, 'enabled').strip())
+           
+       except NoOptionError:
+           logging.critical("Critical component of the Microsoft Azure RHUI repo not found, consider resinstalling the RHUI Repo")
+           exit(1)
+       
+       if enabled != 1:
+           logging.critical('Microsoft RHUI repository not enbaled, please enable it with the following command')
+           logging.critical('yum-config-manager --enable {}'.format(repo_name))
+           exit(1)
+       
+       if re.match('.*(eus|e4s).*', myreponame):
+           return 1
+       else:
+           return 0
+    else:
+        logging.critical("The Microsoft RHUI repo not found, this will lead to problems")
+        logging.critical("Follow this document to reinstall the RHUI Repository RPM: {}".format('https://learn.microsoft.com/en-us/azure/virtual-machines/workloads/redhat/redhat-rhui#image-update-behavior'))
+        exit(1)
 
 
-def disclaimer():
-   logging.info("\n\n Disclaimer : This script helps in detecting RHUI server connectivity issues only for Redhat-6,7 and 8 Pay as you go images deployed from Azure market place. Upon execution this script does not modify anything on the VM instead it will provide suggestion for fix based on the error. Always, download the latest version of the script from git hub url 'https://github.com/Azure/azure-support-scripts/tree/master/Linux_scripts/RHUI_repo_validation_scripts' which will help in effective troubleshooting and also have bugs addressed.\n")
-   logging.info("\n Please record your consent for script execution (yes/no):")
-   val=sys.stdin.readline()
-   option=val.rstrip()
-   logging.debug(option)
-   if ( option == "no" ):
-      logging.info("Aborting the execution")
-      exit()
-   elif ( option == "yes" ):
-      logging.info("consent recorded,starting the execution ...")
-   else:
-      logging.error("invalid input, Please try again")
-      exit()
+def connect_to_microsoft_repo(reposconfig):
+# downloads repomd.xml from Microsoft RHUI Repo
+    
+    logging.debug("Entering connect_to_microsoft_repo()")
+    rhuirepo = '^rhui-microsoft.*'
+    myreponame = ""
+
+    for repo_name in reposconfig.sections():
+        if re.match(rhuirepo, repo_name):
+           logging.debug("Microsoft repository name is: {}".format(repo_name))
+           myreponame = repo_name
+
+    if myreponame:
+       try:
+           baseurl_info = reposconfig.get(myreponame, 'baseurl').strip().split('\n')
+       except NoOptionError:
+           logging.critical("Critical component of the Microsoft Azure RHUI repo not found, consider resinstalling the RHUI Repo")
+           exit(1)
+
+       try:
+           import requests
+       except ImportError:
+           logging.critical("Unable to import required communication modules, review your python instalation")
+           exit(1) 
+       
+       successes = 0
+       for url in baseurl_info:
+           url = url+"/repodata/repomd.xml"
+           logging.debug("This is one of links supporting the RHUI infrastructure {}".format(url))
+
+           headers = {'content-type': 'application/json'}
+           try:
+               r = requests.get(url, headers=headers, timeout=5)
+           except requests.exceptions.Timeout:
+               logging.warning("PROBLEM: Unable to reach RHUI server, https port is blocked for {}".format(url))
+           except requests.exceptions.SSLError:
+               logging.warning("PROBLEM: MITM proxy misconfiguration. Proxy cannot intercept certs for {}".format(url))
+           else:
+                successes += 1
+                logging.debug("the RC for this {} link is {}".format(url,r.status_code))
+
+       if successes == 0:
+           logging.critical("PROBLEM: Cannot communicate with any RHUI server, you must allow at least one of the IP addresses listed here {}".format("https://learn.microsoft.com/azure/virtual-machines/workloads/redhat/redhat-rhui?tabs=rhel9#the-ips-for-the-rhui-content-delivery-servers"))
+           sys.exit(1)
+
+def connect_to_rhui_repos(EUS, reposconfig):
+# check if EUS or NON-EUS repos are being used correctly.
+
+    logging.debug("Entering connect_to_rhui_repos()")
+    import requests
+
+    rhuirepo='^(rhui-)?microsoft.*'
+    default='.*default.*'
+    basearch = 'x86_64'
+
+    enabled_repos = []
+    for repo_name in reposconfig.sections():
+       if not re.match(rhuirepo, repo_name) and not re.match(default, repo_name):
+           try:
+               if reposconfig.get(repo_name, 'enabled').strip() == '1': 
+                   logging.info("Repo {} enabled".format(repo_name))
+                   enabled_repos.append(repo_name) 
+               else:
+                   logging.debug("{} repo not enabled".format(repo_name))
+
+           except NoOptionError:
+               logging.error(" Repo {} does not have an enabled attribute skipping".format(repo_name))
+
+    if len(enabled_repos) == 0:
+        logging.critical("Did not find any enabled repositories in this repo config")
+        exit(1)
+
+    releasever=""
+
+    if EUS:
+        if os.path.exists('/etc/yum/vars/releasever'):
+           fd = open('/etc/yum/vars/releasever')
+           releasever = fd.readline().strip()
+        else:
+           logging.critical('Server is using EUS repostories but /etc/yum/vars/releasever file not found, please correct and test again')
+           logging.critical('Refer to: https://learn.microsoft.com/en-us/azure/virtual-machines/workloads/redhat/redhat-rhui?tabs=rhel7#rhel-eus-and-version-locking-rhel-vms, to select the appropriate RHUI repo')
+           exit(1)
+
+    if not EUS:
+        if os.path.exists('/etc/yum/vars/releasever'):
+            logging.critical('Server is using non-EUS repos and /etc/yum/vars/releasever file found, correct and try again')
+            logging.critical('Refer to: https://learn.microsoft.com/en-us/azure/virtual-machines/workloads/redhat/redhat-rhui?tabs=rhel7#rhel-eus-and-version-locking-rhel-vms, to select the appropriate RHUI repo')
+            exit(1)
+
+        try:
+            uname = os.uname()
+        except:
+            logging.critical("Unknown error")
+            exit(1)    
+
+        try:
+            baserelease = uname.release
+        except AttributeError:
+            baserelease = uname[2]
+
+        releasever  = re.sub(r'^.*el([0-9][0-9]*).*',r'\1',baserelease)
+        if releasever == '7':
+            releasever = '7Server'
+
+            
+
+    for myreponame in enabled_repos:
+        try:
+           baseurl_info = reposconfig.get(myreponame, 'baseurl').strip().split('\n')
+        except NoOptionError:
+            logging.critical("baseurl of {} not found, consider reinstalling the corresponding RHUI repo".format(myreponame))
+            exit(1)
+
+        for url in baseurl_info:
+           url = url+"/repodata/repomd.xml"
+           url = url.replace('$releasever',releasever)
+           url = url.replace('$basearch',basearch)
+           logging.debug("baseurl for repo {} is {}".format(myreponame, url))
+
+           headers = {'content-type': 'application/json'}
+           try:
+               cert=( reposconfig.get(myreponame, 'sslclientcert'), reposconfig.get(myreponame, 'sslclientkey') )
+           except:
+               logging.critical("Client certificate and/or client key attribute not found for {}, testing connectivity w/o certificates ".format(myreponame))
+               cert=()
+
+           successes = 0
+           try:
+               r = requests.get(url, headers=headers, cert=cert, timeout=5)
+               successes += 1
+               logging.debug("the RC for this {} link is {}".format(url,r.status_code))
+           except requests.exceptions.Timeout:
+               logging.warning("PROBLEM: Unable to reach RHUI server, https port is blocked for {}".format(url))
+           except requests.exceptions.SSLError:
+              logging.warning("PROBLEM: MITM proxy misconfiguration. Proxy cannot intercept certs for {}".format(url))
+           except requests.exceptions.RequestException:
+                logging.warning("PROBLEM: Unable to establish communication to {}, please allow SSL traffic to it".format(url))
+
+        if successes == 0:
+            logging.critical("PROBLEM: Cannot communicate with any RHUI server, you must allow at least one")
+            sys.exit(1)
 
 
-def log_func():
-   LOGFILE = "/var/log/azure/rhui_script.log"
-   log = logging.getLogger('')
-   log.setLevel(logging.DEBUG)
-   format = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-   ch = logging.StreamHandler(sys.stdout)
-   ch.setFormatter(format)
-   log.addHandler(ch)
-   fh = logging.FileHandler(LOGFILE)
-   fh.setFormatter(format)
-   log.addHandler(fh)
+if os.geteuid() != 0:
+   logging.critical("This script needs to execute with root privileges\nPlease use: sudo {}".format(sys.argv[0]))
+   exit(1)
+       
+parser = argparse.ArgumentParser()
 
-def script_version():
-   logging.info(SCRIPT_NAME + " " + VERSION)
+parser.add_argument(  '--debug','-d',
+                      action='store_true',
+                      help='Use DEBUG level')
+args = parser.parse_args()
 
-def os_distro():
-  os_distro = platform.linux_distribution()
-  os_ver = (os_distro[0])
-  if "Red Hat Enterprise Linux" in os_ver:
-     redhat()
-  else:
-     msg_os_dist_error()
+if args.debug:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
 
-def __init__():
-   uid = int(os.getuid())
-   if uid == 0:
-      log_func()
-      script_version()
-      disclaimer()
-      os_distro()
-   else:
-     msg_uid_error()
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-__init__()
+package_name                             = rpm_name()
+data                                     = get_pkg_info(package_name)
+expiration_time(data['clientcert'])
+reposconfig                              = check_rhui_repo_file(data['repofile'])
+eus = check_microsoft_repo(reposconfig)
+connect_to_microsoft_repo(reposconfig)
+connect_to_rhui_repos(eus, reposconfig)
